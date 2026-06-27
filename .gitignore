@@ -1,0 +1,38 @@
+# Environment
+.env
+.venv/
+venv/
+.virtualenvs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data
+data/app.db
+data/audio/*
+data/logs/*
+
+# Config
+config.yaml
+!config.example.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# Pytest
+.pytest_cache/

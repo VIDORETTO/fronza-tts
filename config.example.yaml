@@ -1,0 +1,99 @@
+app:
+  name: "TTS Fallback App"
+  free_only_mode: true
+  default_language: "pt-BR"
+  default_output_format: "mp3"
+  audio_output_dir: "data/audio"
+  max_text_chars_warning: 3000
+  max_text_chars_when_quota_unknown: 500
+
+quota_policy:
+  warning_threshold_percent: 80
+  fallback_threshold_percent: 90
+  hard_stop_threshold_percent: 97
+  block_uncertain_quota_for_long_text: true
+  allow_paid_overage: false
+  require_confirmation_for_uncertain_quota: true
+
+fallback:
+  retry_attempts: 2
+  timeout_seconds: 45
+  backoff_seconds: 2
+  fallback_on:
+    - quota_exceeded
+    - rate_limited
+    - timeout
+    - server_error
+    - unsupported_language
+    - unsupported_voice
+    - billing_required
+
+chunk_limits:
+  elevenlabs: 4000
+  cartesia: 4000
+  smallest: 4000
+  gemini: 3000
+  inworld: 2000
+  async_voice: 4000
+
+providers:
+  elevenlabs:
+    enabled: true
+    priority: 1
+    reset_policy: "monthly_billing_cycle"
+    quota_source: "official_api"
+    free_only: true
+    models:
+      - "eleven_v3"
+      - "eleven_flash_v2_5"
+      - "eleven_multilingual_v2"
+
+  cartesia:
+    enabled: true
+    priority: 2
+    reset_policy: "monthly_billing_cycle"
+    quota_source: "official_api_or_local"
+    free_only: true
+    models:
+      - "sonic-3.5"
+
+  smallest:
+    enabled: true
+    priority: 3
+    reset_policy: "one_time_trial_credit_or_manual"
+    quota_source: "manual_config"
+    free_only: true
+    require_manual_balance: true
+    models:
+      - "lightning_v3.1"
+      - "lightning_v3.1_pro"
+
+  gemini:
+    enabled: true
+    priority: 4
+    reset_policy: "daily_and_per_minute_rate_limits"
+    quota_source: "response_metadata_or_local"
+    free_only: true
+    models:
+      - "gemini-tts"
+
+  inworld:
+    enabled: true
+    priority: 5
+    reset_policy: "monthly_or_on_demand"
+    quota_source: "portal_or_local"
+    free_only: true
+    models:
+      - "inworld-tts-1.5-max"
+      - "inworld-tts-2"
+
+  async_voice:
+    enabled: true
+    priority: 6
+    reset_policy: "billing_cycle_or_topup"
+    quota_source: "manual_config"
+    free_only: true
+    require_manual_balance: true
+    models:
+      - "async_flash_v1.5"
+      - "async_pro_v1.0"

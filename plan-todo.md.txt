@@ -1,0 +1,2342 @@
+# Planejamento Completo — App Python TTS Multi-API com Cota Grátis, Controle de Limite e Fallback Automático
+
+## 1. Objetivo do projeto
+
+Criar um aplicativo em Python para gerar áudio a partir de texto usando APIs de Text-to-Speech, priorizando provedores que oferecem algum tipo de uso gratuito via API.
+
+O app deve permitir que o usuário:
+
+* Digite ou cole um texto.
+* Escolha o idioma.
+* Escolha o provedor de voz ou deixe no modo automático.
+* Escolha modelo, voz e configurações de áudio quando disponíveis.
+* Gere áudio via API.
+* Reproduza o áudio dentro do app.
+* Baixe o arquivo gerado.
+* Veja histórico de gerações.
+* Veja quanto já usou de cada provedor.
+* Veja se a cota é mensal, diária, inicial, manual ou incerta.
+* Evite gastar dinheiro acidentalmente.
+* Faça fallback automático para outro provedor quando a cota grátis estiver acabando, quando houver rate limit ou quando uma API falhar.
+
+O diferencial do app não será apenas gerar áudio. O diferencial será ter um **gerenciador inteligente de cotas grátis** e um **roteador de fallback** que escolhe o melhor provedor disponível no momento.
+
+---
+
+## 2. Ideia central
+
+O app deve funcionar como uma camada intermediária entre o usuário e várias APIs de TTS.
+
+Fluxo geral:
+
+```text
+Usuário digita texto
+        ↓
+App calcula tamanho, idioma, estimativa de uso e risco de cobrança
+        ↓
+Quota Manager verifica saldo/cota de cada provedor
+        ↓
+Router escolhe o melhor provedor disponível
+        ↓
+Provider Adapter chama a API correta
+        ↓
+Áudio é salvo localmente
+        ↓
+Uso é registrado no banco
+        ↓
+Painel de limite é atualizado
+        ↓
+Se falhar, o app tenta o próximo provedor
+```
+
+A estrutura deve ser pensada para que novos provedores possam ser adicionados facilmente depois, sem reescrever o app inteiro.
+
+---
+
+## 3. Ponto mais importante: nem toda cota grátis reseta mensalmente
+
+O app precisa diferenciar tipos de limite.
+
+Não pode existir apenas uma coluna chamada “limite mensal”, porque isso ficaria errado para vários provedores.
+
+A estrutura correta é ter uma política de reset por provedor.
+
+## 3.1 Tipos de limite
+
+| Tipo de limite          | Como funciona                                                         | Exemplo de uso no app                                        |
+| ----------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `monthly_billing_cycle` | Reseta todo mês ou no ciclo de cobrança                               | ElevenLabs, Cartesia, Inworld em planos com créditos mensais |
+| `daily_rate_limit`      | Reseta por dia, normalmente por projeto ou modelo                     | Gemini API                                                   |
+| `per_minute_rate_limit` | Limite por minuto ou janela curta de tempo                            | Gemini, Cartesia, Smallest e outros                          |
+| `one_time_trial_credit` | Crédito grátis inicial, não necessariamente volta todo mês            | Smallest, Async ou outros provedores com crédito de teste    |
+| `manual_balance`        | O app não consegue consultar automaticamente; usuário informa o saldo | Smallest, Async, provedores com painel sem endpoint de saldo |
+| `unknown`               | Não há informação confiável suficiente                                | Provedor fica com uso restrito                               |
+| `paid_topup`            | Créditos comprados separadamente                                      | Não usar automaticamente no modo grátis                      |
+| `pay_as_you_go`         | Cobra conforme uso                                                    | Bloquear no modo “não gastar”                                |
+
+---
+
+## 3.2 Regra de segurança
+
+O app deve sempre partir da regra:
+
+> Se o reset da cota não for confirmado, o app não deve assumir que é mensal.
+
+Isso evita que o sistema use uma API achando que o saldo voltou, quando na verdade o crédito grátis era apenas inicial.
+
+---
+
+## 4. Provedores recomendados para o MVP
+
+## 4.1 Provedores principais
+
+| Ordem inicial | Provedor        | Modelo principal                 | Motivo de incluir                                                                                            |
+| ------------: | --------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+|             1 | ElevenLabs      | Eleven v3 / Flash / Multilingual | API madura, fácil de testar e tem endpoint de assinatura/uso                                                 |
+|             2 | Cartesia        | Sonic 3.5                        | Boa cota mensal clara e API moderna                                                                          |
+|             3 | Smallest.ai     | Lightning V3.1 Pro TTS           | Preço baixo por caracteres e bom candidato para grande volume, mas saldo grátis deve ser tratado com cautela |
+|             4 | Gemini API      | Gemini Flash TTS                 | Pode ser forte e barato, mas limite grátis é por tier/rate limit, não simples mensal                         |
+|             5 | Inworld         | TTS-2 / TTS 1.5 Max              | Bom limite grátis em minutos e produtos de voz                                                               |
+|             6 | Async Voice API | Async Flash / Async Pro          | Útil como fallback, mas controle de crédito pode ser mais manual                                             |
+
+---
+
+## 4.2 Provedores para deixar fora do MVP
+
+| Provedor                    | Motivo                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| xAI Text to Speech          | Tem API, mas não há cota grátis pública clara para considerar no MVP grátis    |
+| MiniMax Speech 2.8 HD/Turbo | API aparentemente mais focada em uso pago                                      |
+| StepAudio 2.5 TTS           | Sem cota grátis pública clara                                                  |
+| Fun-Realtime-TTS            | Informações dependem de SKU, região e provedor; melhor deixar para fase futura |
+
+---
+
+## 5. Tabela de comportamento de cota por provedor
+
+| Provedor        | API? |                Cota grátis via API? | Reset provável               | Como o app deve tratar                                          |
+| --------------- | ---: | ----------------------------------: | ---------------------------- | --------------------------------------------------------------- |
+| ElevenLabs      |  Sim |                                 Sim | Mensal                       | Pode consultar uso por API e atualizar automaticamente          |
+| Cartesia        |  Sim |                                 Sim | Mensal                       | Pode usar como provedor recorrente importante                   |
+| Gemini API      |  Sim |        Sim, mas por tier/rate limit | Diário/minuto/projeto/modelo | Não tratar como mensal; controlar rate limit e erros 429        |
+| Inworld         |  Sim |                                 Sim | Mensal ou On-Demand gratuito | Controlar por créditos/minutos e confirmar uso no painel        |
+| Smallest.ai     |  Sim | Sim/inicial, mas não assumir mensal | Manual ou crédito inicial    | Usuário deve informar saldo real ou o app usar estimativa local |
+| Async Voice API |  Sim |                   Sim, mas limitado | Depende do plano/top-up      | Usar como fallback e controlar saldo manualmente                |
+
+---
+
+## 6. Filosofia do app
+
+O app deve ter 3 modos de operação:
+
+## 6.1 Modo seguro grátis
+
+Nome interno:
+
+```yaml
+free_only_mode: true
+```
+
+Esse é o modo padrão.
+
+Nesse modo:
+
+* Nunca usar provedor sem API key.
+* Nunca usar provedor com cobrança pay-as-you-go sem saldo grátis confirmado.
+* Nunca usar top-up pago automaticamente.
+* Nunca assumir reset mensal se não houver confirmação.
+* Nunca gerar texto grande em provedor com cota incerta.
+* Nunca continuar tentando infinitamente após erro.
+* Nunca usar uma API que retornou erro de cobrança, quota exceeded ou billing required.
+* Sempre avisar o usuário antes de usar provedor com cota incerta.
+
+Esse modo deve ser o padrão porque o objetivo do app é aproveitar cotas grátis sem gastar por acidente.
+
+---
+
+## 6.2 Modo automático com fallback
+
+Nesse modo o usuário só digita o texto, escolhe idioma e clica em gerar.
+
+O sistema decide:
+
+* Qual provedor suporta o idioma.
+* Qual provedor tem saldo/cota disponível.
+* Qual provedor tem menor risco de cobrança.
+* Qual provedor está menos próximo do limite.
+* Qual provedor falhou recentemente.
+* Qual provedor deve ser pulado.
+
+---
+
+## 6.3 Modo manual
+
+Nesse modo o usuário força um provedor específico.
+
+Mesmo assim o app deve avisar:
+
+* Se a cota estiver baixa.
+* Se a cota for incerta.
+* Se o provedor for pay-as-you-go.
+* Se o reset não for mensal.
+* Se existe risco de cobrança.
+
+O app pode permitir gerar mesmo assim, mas deve exigir confirmação explícita quando houver risco.
+
+---
+
+## 7. Stack recomendada
+
+## 7.1 Stack do MVP
+
+```text
+Python 3.11+
+Streamlit
+SQLite
+SQLModel ou SQLAlchemy
+Pydantic
+httpx
+python-dotenv
+PyYAML
+Tenacity
+Loguru
+Pydub
+FFmpeg
+```
+
+## 7.2 Por que Streamlit?
+
+Streamlit é o melhor caminho para um MVP rápido porque permite criar facilmente:
+
+* Campo de texto grande.
+* Contador de caracteres.
+* Dropdown de idioma.
+* Dropdown de provedor.
+* Dropdown de voz.
+* Botão de gerar.
+* Player de áudio.
+* Tabela de limites.
+* Histórico.
+* Painel de configurações.
+
+Depois, se quiser transformar em app desktop mais bonito, pode migrar a UI para:
+
+* Flet
+* PySide6
+* Tauri com backend Python
+* FastAPI + frontend web
+
+Mas para começar, Streamlit é mais rápido e suficiente.
+
+---
+
+## 8. Arquitetura recomendada
+
+## 8.1 Visão geral
+
+```text
+tts_fallback_app
+│
+├── UI Streamlit
+│   ├── Tela de geração
+│   ├── Tela de limites
+│   ├── Tela de provedores
+│   ├── Tela de histórico
+│   └── Tela de comparação
+│
+├── Core
+│   ├── TTS Router
+│   ├── Fallback Engine
+│   ├── Quota Manager
+│   ├── Usage Estimator
+│   ├── Text Chunker
+│   ├── Audio Storage
+│   └── Error Normalizer
+│
+├── Provider Adapters
+│   ├── ElevenLabs
+│   ├── Cartesia
+│   ├── Smallest
+│   ├── Gemini
+│   ├── Inworld
+│   └── Async
+│
+├── Banco SQLite
+│   ├── Provedores
+│   ├── API keys
+│   ├── Cotas
+│   ├── Uso
+│   ├── Gerações
+│   └── Eventos de fallback
+│
+└── Arquivos locais
+    ├── Áudios gerados
+    ├── Metadados JSON
+    └── Logs
+```
+
+---
+
+## 8.2 Regra de ouro
+
+A interface nunca deve chamar APIs diretamente.
+
+Errado:
+
+```python
+# Errado
+if provider == "elevenlabs":
+    requests.post(...)
+```
+
+Certo:
+
+```python
+# Certo
+result = tts_service.generate(request)
+```
+
+A UI só fala com o `TTSService`.
+
+O `TTSService` fala com o `TTSRouter`.
+
+O `TTSRouter` escolhe o provedor.
+
+O provedor real fica escondido dentro de um adapter.
+
+---
+
+## 9. Estrutura de pastas
+
+```text
+tts_fallback_app/
+│
+├── app/
+│   ├── main.py
+│   │
+│   ├── ui/
+│   │   ├── streamlit_app.py
+│   │   ├── pages/
+│   │   │   ├── 1_generate.py
+│   │   │   ├── 2_limits.py
+│   │   │   ├── 3_providers.py
+│   │   │   ├── 4_history.py
+│   │   │   └── 5_compare.py
+│   │   └── components/
+│   │       ├── audio_player.py
+│   │       ├── provider_card.py
+│   │       ├── quota_badge.py
+│   │       ├── quota_table.py
+│   │       ├── fallback_timeline.py
+│   │       └── warning_box.py
+│   │
+│   ├── core/
+│   │   ├── tts_service.py
+│   │   ├── router.py
+│   │   ├── fallback_engine.py
+│   │   ├── quota_manager.py
+│   │   ├── reset_policy.py
+│   │   ├── usage_estimator.py
+│   │   ├── usage_tracker.py
+│   │   ├── text_chunker.py
+│   │   ├── audio_storage.py
+│   │   ├── audio_merger.py
+│   │   ├── config.py
+│   │   ├── errors.py
+│   │   └── constants.py
+│   │
+│   ├── providers/
+│   │   ├── base.py
+│   │   ├── registry.py
+│   │   ├── elevenlabs.py
+│   │   ├── cartesia.py
+│   │   ├── smallest.py
+│   │   ├── gemini.py
+│   │   ├── inworld.py
+│   │   └── async_voice.py
+│   │
+│   ├── db/
+│   │   ├── session.py
+│   │   ├── models.py
+│   │   ├── init_db.py
+│   │   └── repositories/
+│   │       ├── provider_repo.py
+│   │       ├── api_key_repo.py
+│   │       ├── quota_repo.py
+│   │       ├── usage_repo.py
+│   │       ├── generation_repo.py
+│   │       └── fallback_repo.py
+│   │
+│   ├── schemas/
+│   │   ├── tts.py
+│   │   ├── quota.py
+│   │   ├── provider.py
+│   │   ├── generation.py
+│   │   ├── usage.py
+│   │   └── errors.py
+│   │
+│   └── utils/
+│       ├── security.py
+│       ├── hashing.py
+│       ├── datetime_utils.py
+│       ├── file_utils.py
+│       └── logging.py
+│
+├── data/
+│   ├── app.db
+│   ├── audio/
+│   ├── exports/
+│   └── logs/
+│
+├── docs/
+│   ├── provider-verification.md
+│   ├── quota-policies.md
+│   ├── reset-policies.md
+│   ├── api-notes.md
+│   └── architecture.md
+│
+├── tests/
+│   ├── test_router.py
+│   ├── test_fallback_engine.py
+│   ├── test_quota_manager.py
+│   ├── test_reset_policy.py
+│   ├── test_usage_estimator.py
+│   ├── test_text_chunker.py
+│   ├── test_audio_storage.py
+│   └── providers/
+│       ├── test_elevenlabs.py
+│       ├── test_cartesia.py
+│       ├── test_smallest.py
+│       ├── test_gemini.py
+│       ├── test_inworld.py
+│       └── test_async_voice.py
+│
+├── .env.example
+├── config.example.yaml
+├── pyproject.toml
+├── README.md
+└── TASKS.md
+```
+
+---
+
+## 10. Interface do usuário
+
+## 10.1 Tela principal: Gerar áudio
+
+A tela principal deve ter:
+
+### Campo de texto
+
+* Área grande para colar texto.
+* Contador de caracteres em tempo real.
+* Estimativa aproximada de tokens.
+* Estimativa aproximada de duração.
+* Alerta se o texto for grande demais.
+* Alerta se o texto exigir chunking.
+* Botão para limpar texto.
+* Botão para carregar `.txt` ou `.md`.
+
+### Configurações principais
+
+* Idioma:
+
+  * Auto
+  * Português Brasil
+  * Inglês
+  * Espanhol
+  * Francês
+  * Alemão
+  * Italiano
+  * Japonês
+  * Outros, conforme suporte dos provedores
+
+* Modo de escolha:
+
+  * Automático com fallback
+  * Forçar provedor
+  * Comparar provedores
+  * Melhor cota grátis
+  * Melhor qualidade
+  * Menor risco de cobrança
+
+* Provedor:
+
+  * Auto
+  * ElevenLabs
+  * Cartesia
+  * Smallest
+  * Gemini
+  * Inworld
+  * Async
+
+* Modelo:
+
+  * Dependente do provedor
+
+* Voz:
+
+  * Voz padrão
+  * Voz escolhida
+  * Campo manual de `voice_id`
+  * Botão “Atualizar vozes”
+
+### Configurações avançadas
+
+Quando o provedor permitir:
+
+* Formato de saída:
+
+  * MP3
+  * WAV
+  * OGG
+  * PCM
+
+* Velocidade da fala
+
+* Estabilidade
+
+* Similaridade
+
+* Estilo
+
+* Emoção
+
+* Entonação
+
+* Instrução de voz
+
+* Sample rate
+
+* Streaming
+
+* Timestamps
+
+* Normalização de texto
+
+* Remover emojis
+
+* Remover URLs
+
+* Pausas automáticas
+
+* Divisão por parágrafos
+
+### Botões
+
+* Gerar áudio
+* Gerar teste curto
+* Testar todos
+* Comparar qualidade
+* Salvar texto como preset
+
+### Resultado
+
+Após gerar:
+
+* Player de áudio.
+* Botão download.
+* Provedor usado.
+* Modelo usado.
+* Voz usada.
+* Idioma.
+* Quantidade de caracteres.
+* Unidade consumida.
+* Custo estimado.
+* Tempo de geração.
+* Se houve fallback.
+* Qual provedor falhou antes.
+* Motivo do fallback.
+
+---
+
+## 10.2 Tela de limites
+
+Essa tela é essencial.
+
+Ela deve mostrar uma tabela como:
+
+| Provedor   | Status | Cota             | Reset             |    Usado | Restante | Risco | Fonte        | Próximo uso      |
+| ---------- | ------ | ---------------- | ----------------- | -------: | -------: | ----- | ------------ | ---------------- |
+| ElevenLabs | OK     | Mensal           | Ciclo mensal      |    2.000 |    8.000 | Baixo | API oficial  | Pode usar        |
+| Cartesia   | OK     | Mensal           | Mensal            |    5.000 |   15.000 | Médio | API/local    | Pode usar        |
+| Gemini     | OK     | Rate limit       | Diário/minuto     |  incerto |  incerto | Médio | API/local    | Usar com cautela |
+| Inworld    | OK     | Minutos/créditos | Mensal/UTC        |   20 min |   50 min | Baixo | Portal/local | Pode usar        |
+| Smallest   | Manual | Crédito inicial  | Não assumir reset | estimado | estimado | Alto  | Manual       | Confirmar saldo  |
+| Async      | Manual | Crédito/plano    | Ciclo/top-up      | estimado | estimado | Médio | Manual       | Fallback         |
+
+### Badges visuais
+
+O app deve usar badges simples:
+
+* `SEGURO`
+* `COTA BAIXA`
+* `QUASE ESGOTADO`
+* `BLOQUEADO`
+* `RESET MENSAL`
+* `RESET DIÁRIO`
+* `CRÉDITO INICIAL`
+* `MANUAL`
+* `INCERTO`
+* `RISCO DE COBRANÇA`
+
+---
+
+## 10.3 Tela de provedores
+
+Cada provedor deve ter um card:
+
+```text
+ElevenLabs
+Status: OK
+API key: configurada
+Cota: mensal
+Fonte da cota: API oficial
+Última atualização: hoje 14:30
+Último erro: nenhum
+
+Ações:
+- Testar conexão
+- Atualizar cota
+- Testar áudio curto
+- Editar prioridade
+- Desativar provedor
+```
+
+Para provedores com cota incerta:
+
+```text
+Smallest.ai
+Status: atenção
+API key: configurada
+Cota: manual / crédito inicial
+Reset: não assumir mensal
+Fonte da cota: estimativa local
+
+Atenção:
+O app não conseguiu confirmar reset mensal. Informe manualmente o saldo grátis visto no painel.
+
+Ações:
+- Informar saldo manual
+- Testar conexão
+- Testar áudio curto
+- Desativar uso automático
+```
+
+---
+
+## 10.4 Tela de histórico
+
+Mostrar todas as gerações:
+
+| Data | Texto | Provedor | Modelo | Voz | Caracteres | Status | Fallback | Download |
+| ---- | ----- | -------- | ------ | --- | ---------: | ------ | -------- | -------- |
+
+Ações:
+
+* Reproduzir.
+* Baixar.
+* Copiar texto.
+* Gerar novamente.
+* Gerar com outro provedor.
+* Marcar como favorito.
+* Excluir.
+* Exportar CSV.
+
+---
+
+## 10.5 Tela de comparação
+
+Essa tela serve para comparar vozes e qualidade.
+
+Fluxo:
+
+1. Usuário escreve um texto curto.
+2. App gera com todos os provedores disponíveis.
+3. Mostra players lado a lado.
+4. Usuário dá nota para cada um.
+5. App salva preferência.
+
+Tabela:
+
+| Provedor | Modelo | Voz | Tempo | Caracteres | Consumo | Nota do usuário |
+| -------- | ------ | --- | ----: | ---------: | ------: | --------------: |
+
+Depois, o roteador pode usar a nota do usuário como critério.
+
+---
+
+## 11. Configuração do app
+
+Arquivo `config.example.yaml`:
+
+```yaml
+app:
+  name: "TTS Fallback App"
+  free_only_mode: true
+  default_language: "pt-BR"
+  default_output_format: "mp3"
+  audio_output_dir: "data/audio"
+  max_text_chars_warning: 3000
+  max_text_chars_when_quota_unknown: 500
+
+quota_policy:
+  warning_threshold_percent: 80
+  fallback_threshold_percent: 90
+  hard_stop_threshold_percent: 97
+  block_uncertain_quota_for_long_text: true
+  allow_paid_overage: false
+  require_confirmation_for_uncertain_quota: true
+
+fallback:
+  retry_attempts: 2
+  timeout_seconds: 45
+  backoff_seconds: 2
+  fallback_on:
+    - quota_exceeded
+    - rate_limited
+    - timeout
+    - server_error
+    - unsupported_language
+    - unsupported_voice
+    - billing_required
+
+providers:
+  elevenlabs:
+    enabled: true
+    priority: 1
+    reset_policy: "monthly_billing_cycle"
+    quota_source: "official_api"
+    free_only: true
+    models:
+      - "eleven_v3"
+      - "eleven_flash_v2_5"
+      - "eleven_multilingual_v2"
+
+  cartesia:
+    enabled: true
+    priority: 2
+    reset_policy: "monthly_billing_cycle"
+    quota_source: "official_api_or_local"
+    free_only: true
+    models:
+      - "sonic-3.5"
+
+  smallest:
+    enabled: true
+    priority: 3
+    reset_policy: "one_time_trial_credit_or_manual"
+    quota_source: "manual_config"
+    free_only: true
+    require_manual_balance: true
+    models:
+      - "lightning_v3.1"
+      - "lightning_v3.1_pro"
+
+  gemini:
+    enabled: true
+    priority: 4
+    reset_policy: "daily_and_per_minute_rate_limits"
+    quota_source: "response_metadata_or_local"
+    free_only: true
+    models:
+      - "gemini-tts"
+
+  inworld:
+    enabled: true
+    priority: 5
+    reset_policy: "monthly_or_on_demand"
+    quota_source: "portal_or_local"
+    free_only: true
+    models:
+      - "inworld-tts-1.5-max"
+      - "inworld-tts-2"
+
+  async_voice:
+    enabled: true
+    priority: 6
+    reset_policy: "billing_cycle_or_topup"
+    quota_source: "manual_config"
+    free_only: true
+    require_manual_balance: true
+    models:
+      - "async_flash_v1.5"
+      - "async_pro_v1.0"
+```
+
+---
+
+## 12. Variáveis de ambiente
+
+Arquivo `.env.example`:
+
+```env
+DATABASE_URL=sqlite:///data/app.db
+APP_SECRET_KEY=change-me
+
+ELEVENLABS_API_KEY=
+
+CARTESIA_API_KEY=
+CARTESIA_ADMIN_API_KEY=
+
+SMALLEST_API_KEY=
+
+GEMINI_API_KEY=
+
+INWORLD_API_KEY=
+
+ASYNC_API_KEY=
+```
+
+Regras:
+
+* Nunca commitar `.env`.
+* Nunca exibir chave completa na UI.
+* Nunca logar chave.
+* Mascarar chave na interface.
+* Permitir apagar chave.
+* Permitir testar conexão.
+* Permitir trocar chave.
+
+---
+
+## 13. Modelos internos de dados
+
+## 13.1 TTSRequest
+
+```python
+class TTSRequest(BaseModel):
+    text: str
+    language: str | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
+    voice_id: str | None = None
+    output_format: str = "mp3"
+    speed: float | None = None
+    emotion: str | None = None
+    style: str | None = None
+    stream: bool = False
+    timestamps: bool = False
+    force_provider: bool = False
+    free_only: bool = True
+```
+
+---
+
+## 13.2 TTSResult
+
+```python
+class TTSResult(BaseModel):
+    generation_id: str
+    provider_id: str
+    model_id: str | None
+    voice_id: str | None
+    language: str | None
+    audio_file_path: str
+    output_format: str
+    duration_seconds: float | None
+    usage: "UsageRecord"
+    fallback_chain: list[str] = []
+    warnings: list[str] = []
+    raw_response: dict | None = None
+```
+
+---
+
+## 13.3 QuotaSnapshot
+
+```python
+class QuotaSnapshot(BaseModel):
+    provider_id: str
+    unit: Literal[
+        "characters",
+        "credits",
+        "tokens",
+        "minutes",
+        "usd",
+        "requests",
+        "unknown"
+    ]
+    used: float | None
+    limit: float | None
+    remaining: float | None
+    reset_policy: Literal[
+        "monthly_billing_cycle",
+        "daily_rate_limit",
+        "per_minute_rate_limit",
+        "one_time_trial_credit",
+        "manual_balance",
+        "paid_topup",
+        "pay_as_you_go",
+        "unknown"
+    ]
+    reset_at: datetime | None
+    source: Literal[
+        "official_api",
+        "response_metadata",
+        "local_ledger",
+        "manual_config",
+        "portal_manual",
+        "unknown"
+    ]
+    confidence: Literal["high", "medium", "low"]
+    updated_at: datetime
+```
+
+---
+
+## 13.4 UsageEstimate
+
+```python
+class UsageEstimate(BaseModel):
+    provider_id: str
+    unit: str
+    estimated_amount: float
+    confidence: Literal["high", "medium", "low"]
+    notes: str | None = None
+```
+
+---
+
+## 13.5 ProviderError
+
+```python
+class ProviderError(BaseModel):
+    provider_id: str
+    error_type: Literal[
+        "auth_error",
+        "quota_exceeded",
+        "rate_limited",
+        "billing_required",
+        "server_error",
+        "timeout",
+        "unsupported_language",
+        "unsupported_voice",
+        "bad_request",
+        "unknown"
+    ]
+    retryable: bool
+    fallback_allowed: bool
+    raw_status_code: int | None = None
+    message: str
+```
+
+---
+
+## 14. Banco de dados
+
+Usar SQLite no MVP.
+
+## 14.1 Tabela `providers`
+
+```sql
+CREATE TABLE providers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL,
+    free_only BOOLEAN NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    reset_policy TEXT NOT NULL DEFAULT 'unknown',
+    quota_source TEXT NOT NULL DEFAULT 'unknown',
+    last_error TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+```
+
+---
+
+## 14.2 Tabela `api_keys`
+
+```sql
+CREATE TABLE api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    key_name TEXT NOT NULL,
+    encrypted_value TEXT NOT NULL,
+    is_admin_key BOOLEAN NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+```
+
+---
+
+## 14.3 Tabela `quota_snapshots`
+
+```sql
+CREATE TABLE quota_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    used REAL,
+    limit_value REAL,
+    remaining REAL,
+    reset_policy TEXT NOT NULL,
+    reset_at DATETIME,
+    source TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    raw_response_json TEXT,
+    created_at DATETIME NOT NULL
+);
+```
+
+---
+
+## 14.4 Tabela `manual_balances`
+
+```sql
+CREATE TABLE manual_balances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    balance REAL NOT NULL,
+    note TEXT,
+    valid_until DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+```
+
+Essa tabela é importante para provedores onde o app não consegue consultar saldo pela API.
+
+Exemplo:
+
+* Smallest.ai
+* Async
+* Provedores com painel web, mas sem endpoint claro de uso
+* Provedores com crédito de teste
+
+---
+
+## 14.5 Tabela `usage_ledger`
+
+```sql
+CREATE TABLE usage_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    model_id TEXT,
+    voice_id TEXT,
+    language TEXT,
+    text_hash TEXT NOT NULL,
+    characters INTEGER NOT NULL,
+    estimated_tokens INTEGER,
+    estimated_seconds REAL,
+    actual_unit TEXT,
+    actual_used REAL,
+    source TEXT NOT NULL,
+    generation_id TEXT,
+    created_at DATETIME NOT NULL
+);
+```
+
+---
+
+## 14.6 Tabela `generations`
+
+```sql
+CREATE TABLE generations (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL,
+    model_id TEXT,
+    voice_id TEXT,
+    language TEXT,
+    input_text TEXT NOT NULL,
+    input_characters INTEGER NOT NULL,
+    output_file_path TEXT NOT NULL,
+    output_format TEXT NOT NULL,
+    duration_seconds REAL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    fallback_from TEXT,
+    fallback_chain TEXT,
+    created_at DATETIME NOT NULL
+);
+```
+
+---
+
+## 14.7 Tabela `fallback_events`
+
+```sql
+CREATE TABLE fallback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation_id TEXT,
+    from_provider TEXT,
+    to_provider TEXT,
+    reason TEXT NOT NULL,
+    error_code TEXT,
+    created_at DATETIME NOT NULL
+);
+```
+
+---
+
+## 15. Provider adapters
+
+Todo provedor deve implementar a mesma interface.
+
+```python
+class TTSProvider(Protocol):
+    provider_id: str
+
+    def list_models(self) -> list[ModelInfo]:
+        ...
+
+    def list_voices(self, language: str | None = None) -> list[VoiceInfo]:
+        ...
+
+    def estimate_usage(self, request: TTSRequest) -> UsageEstimate:
+        ...
+
+    def get_quota(self) -> QuotaSnapshot:
+        ...
+
+    def synthesize(self, request: TTSRequest) -> TTSResult:
+        ...
+
+    def normalize_error(self, error: Exception) -> ProviderError:
+        ...
+
+    def supports_language(self, language: str | None) -> bool:
+        ...
+
+    def supports_output_format(self, output_format: str) -> bool:
+        ...
+```
+
+---
+
+## 16. Adapter ElevenLabs
+
+## 16.1 Responsabilidades
+
+* Gerar áudio por API.
+* Listar vozes.
+* Listar modelos.
+* Consultar assinatura e cota.
+* Retornar `character_count`, `character_limit` ou equivalente.
+* Tratar créditos como consumo por caractere em TTS.
+* Registrar reset mensal.
+* Bloquear quando a cota acabar no modo grátis.
+
+## 16.2 Política de reset
+
+```yaml
+reset_policy: monthly_billing_cycle
+quota_source: official_api
+confidence: high
+```
+
+## 16.3 Observações para implementação
+
+A ElevenLabs é uma boa primeira integração porque o controle de cota é mais direto.
+
+O adapter deve:
+
+* Consultar a assinatura ao abrir o app.
+* Consultar novamente após cada geração.
+* Registrar uso local como backup.
+* Comparar uso oficial com ledger local.
+* Exibir alerta se estiver perto do limite.
+* Tratar vozes indisponíveis no plano grátis.
+
+---
+
+## 17. Adapter Cartesia
+
+## 17.1 Responsabilidades
+
+* Gerar áudio com Sonic.
+* Usar modelo `sonic-3.5`.
+* Consultar créditos quando possível.
+* Usar chave admin se necessário para endpoint de uso.
+* Controlar 20K créditos/mês no plano grátis, se confirmado na conta.
+* Tratar rate limit.
+
+## 17.2 Política de reset
+
+```yaml
+reset_policy: monthly_billing_cycle
+quota_source: official_api_or_local
+confidence: high_or_medium
+```
+
+## 17.3 Observações
+
+A Cartesia deve ser tratada como um dos melhores provedores recorrentes porque a cota mensal grátis é clara.
+
+Se o usuário não configurar a chave admin de uso, o app deve cair para `local_ledger`.
+
+---
+
+## 18. Adapter Smallest.ai
+
+## 18.1 Responsabilidades
+
+* Gerar áudio com Lightning V3.1 ou Lightning V3.1 Pro.
+* Estimar custo por caracteres.
+* Permitir saldo manual.
+* Não assumir reset mensal.
+* Bloquear uso automático se não houver saldo manual configurado.
+
+## 18.2 Política de reset
+
+```yaml
+reset_policy: one_time_trial_credit_or_manual
+quota_source: manual_config
+confidence: medium_or_low
+```
+
+## 18.3 Observações
+
+A Smallest pode ser muito boa por custo por caractere, mas o app deve ser conservador.
+
+Regras:
+
+* Se o painel do usuário mostrar crédito grátis, ele informa manualmente no app.
+* O app desconta estimativas desse saldo.
+* Se não houver saldo manual, o provedor não deve ser usado no modo automático.
+* Se o usuário quiser forçar, mostrar alerta de risco.
+
+Exemplo de estimativa:
+
+```text
+custo_estimado_usd = caracteres / 10000 * preco_por_10k_caracteres
+```
+
+Esse preço deve ficar no config e ser editável.
+
+---
+
+## 19. Adapter Gemini
+
+## 19.1 Responsabilidades
+
+* Gerar fala via Gemini API.
+* Tratar limites por projeto, modelo e tier.
+* Ler metadados de uso quando disponíveis.
+* Estimar tokens antes da chamada.
+* Tratar erro 429 como rate limit ou quota.
+* Não tratar cota como mensal.
+
+## 19.2 Política de reset
+
+```yaml
+reset_policy: daily_and_per_minute_rate_limits
+quota_source: response_metadata_or_local
+confidence: medium
+```
+
+## 19.3 Observações
+
+Gemini deve ter uma tela especial no painel:
+
+```text
+Atenção:
+O limite do Gemini depende do projeto, modelo e tier da sua conta.
+Confira o limite real no Google AI Studio.
+O app usa estimativa local e respostas da API para evitar excesso.
+```
+
+No app, Gemini deve ser ótimo como fallback, mas com controle cuidadoso.
+
+---
+
+## 20. Adapter Inworld
+
+## 20.1 Responsabilidades
+
+* Gerar TTS via API.
+* Usar `voiceId`.
+* Usar `modelId`.
+* Tratar limite grátis em minutos para conta On-Demand.
+* Registrar uso local por caracteres/minutos.
+* Exibir que o uso pode ser compartilhado entre API e Playground.
+* Usar período mensal em UTC, quando aplicável.
+
+## 20.2 Política de reset
+
+```yaml
+reset_policy: monthly_or_on_demand
+quota_source: portal_or_local
+confidence: medium
+```
+
+## 20.3 Observações
+
+O app deve registrar tanto:
+
+* Caracteres enviados.
+* Duração estimada do áudio.
+* Minutos gerados.
+* Créditos estimados.
+
+Porque a cobrança e a exibição do painel podem variar.
+
+---
+
+## 21. Adapter Async Voice API
+
+## 21.1 Responsabilidades
+
+* Gerar áudio via API.
+* Suportar modelos:
+
+  * `async_pro_v1.0`
+  * `async_flash_v1.5`
+  * `async_flash_v1.0`
+* Controlar créditos manualmente.
+* Tratar créditos de plano mensal de forma diferente de top-up.
+* Usar como fallback final.
+
+## 21.2 Política de reset
+
+```yaml
+reset_policy: billing_cycle_or_topup
+quota_source: manual_config
+confidence: medium_or_low
+```
+
+## 21.3 Observações
+
+Async deve ser tratado com cuidado porque o pricing pode misturar produto de plataforma, créditos, geração e API.
+
+O app deve perguntar ao usuário:
+
+```text
+Seu saldo Async é mensal, top-up ou crédito grátis inicial?
+```
+
+E registrar isso.
+
+---
+
+## 22. Quota Manager
+
+O `QuotaManager` é o coração do app.
+
+Ele precisa responder uma pergunta:
+
+> Posso usar este provedor para este texto agora, sem risco de gastar dinheiro?
+
+## 22.1 Funções principais
+
+```python
+class QuotaManager:
+    def get_snapshot(self, provider_id: str) -> QuotaSnapshot:
+        ...
+
+    def refresh_quota(self, provider_id: str) -> QuotaSnapshot:
+        ...
+
+    def estimate_request_usage(
+        self,
+        provider_id: str,
+        request: TTSRequest
+    ) -> UsageEstimate:
+        ...
+
+    def can_use(
+        self,
+        provider_id: str,
+        request: TTSRequest,
+        estimate: UsageEstimate,
+        quota: QuotaSnapshot
+    ) -> QuotaDecision:
+        ...
+
+    def record_usage(self, result: TTSResult) -> None:
+        ...
+
+    def apply_reset_policy(self, provider_id: str) -> None:
+        ...
+```
+
+---
+
+## 22.2 QuotaDecision
+
+```python
+class QuotaDecision(BaseModel):
+    allowed: bool
+    reason: str
+    risk_level: Literal["low", "medium", "high", "blocked"]
+    requires_confirmation: bool = False
+```
+
+---
+
+## 22.3 Regras de decisão
+
+| Situação                                           | Decisão                                          |
+| -------------------------------------------------- | ------------------------------------------------ |
+| Cota oficial disponível e suficiente               | Permitir                                         |
+| Cota oficial acima de 80% usada                    | Permitir com alerta                              |
+| Cota oficial acima de 90% usada                    | Pular no modo automático                         |
+| Cota oficial acima de 97% usada                    | Bloquear                                         |
+| Cota manual zerada                                 | Bloquear                                         |
+| Cota desconhecida e texto pequeno                  | Permitir somente com confirmação, se configurado |
+| Cota desconhecida e texto grande                   | Bloquear no modo grátis                          |
+| Provedor pay-as-you-go sem saldo grátis confirmado | Bloquear                                         |
+| Provedor retornou quota exceeded                   | Bloquear até reset/manual                        |
+| Provedor retornou billing required                 | Bloquear                                         |
+
+---
+
+## 23. Reset Policy Engine
+
+Criar um módulo próprio para reset de cota.
+
+```python
+class ResetPolicyEngine:
+    def should_reset(
+        self,
+        provider_id: str,
+        last_snapshot: QuotaSnapshot,
+        now: datetime
+    ) -> bool:
+        ...
+
+    def get_next_reset_at(
+        self,
+        provider_id: str,
+        reset_policy: str
+    ) -> datetime | None:
+        ...
+```
+
+## 23.1 Políticas
+
+### `monthly_billing_cycle`
+
+Usado quando a cota é mensal.
+
+Regras:
+
+* Se a API informar data de renovação, usar a data oficial.
+* Se não informar, usar data manual configurada.
+* Se não houver data, mostrar “ciclo mensal não confirmado”.
+
+### `daily_rate_limit`
+
+Usado quando o limite é diário.
+
+Regras:
+
+* Reset diário.
+* Não somar isso como “crédito mensal”.
+* Mostrar no painel como limite de requests/tokens por dia.
+
+### `per_minute_rate_limit`
+
+Usado para limites de RPM/TPM.
+
+Regras:
+
+* Controlar janela curta local.
+* Se receber 429, esperar ou fazer fallback.
+* Não consumir cota mensal.
+
+### `one_time_trial_credit`
+
+Usado para crédito grátis inicial.
+
+Regras:
+
+* Nunca resetar automaticamente.
+* Só atualizar se o usuário informar novo saldo.
+* Se acabar, marcar como esgotado.
+
+### `manual_balance`
+
+Usado quando o app não sabe consultar saldo.
+
+Regras:
+
+* Usuário informa saldo.
+* App desconta estimativa.
+* App exibe confiança média/baixa.
+* App pede revisão periódica.
+
+### `paid_topup`
+
+Usado quando o usuário compra créditos.
+
+Regras:
+
+* Não usar no modo grátis.
+* Só usar se o usuário ativar `allow_paid_balance`.
+
+### `pay_as_you_go`
+
+Usado quando não existe cota grátis clara.
+
+Regras:
+
+* Bloquear no modo grátis.
+* Exigir confirmação para qualquer geração.
+
+---
+
+## 24. Fallback Engine
+
+O `FallbackEngine` escolhe o próximo provedor.
+
+## 24.1 Motivos para fallback
+
+* Cota quase acabando.
+* Cota esgotada.
+* Cota incerta.
+* Rate limit.
+* Timeout.
+* Erro 5xx.
+* Voz indisponível.
+* Idioma indisponível.
+* Chave inválida.
+* Billing required.
+* Modelo fora do ar.
+
+## 24.2 Ordem inicial recomendada
+
+Para uso real, uma ordem segura seria:
+
+```text
+1. ElevenLabs
+2. Cartesia
+3. Smallest.ai
+4. Gemini
+5. Inworld
+6. Async
+```
+
+Mas a ordem ideal deve ser editável pelo usuário.
+
+## 24.3 Ranking automático
+
+O app pode calcular uma pontuação:
+
+```text
+score =
+  prioridade_configurada
+  + bonus_cota_oficial
+  + bonus_cota_restante
+  + bonus_reset_mensal_confirmado
+  + bonus_suporte_idioma
+  + bonus_qualidade_usuario
+  - penalidade_cota_incerta
+  - penalidade_rate_limit
+  - penalidade_erro_recente
+  - penalidade_risco_cobranca
+```
+
+## 24.4 Pesos sugeridos
+
+| Critério                   |       Peso |
+| -------------------------- | ---------: |
+| Prioridade configurada     | +100 a +10 |
+| Cota oficial consultável   |        +25 |
+| Reset mensal confirmado    |        +20 |
+| Cota restante alta         |        +30 |
+| Suporta idioma nativamente |        +20 |
+| Voz preferida disponível   |        +15 |
+| Boa nota do usuário        |        +10 |
+| Cota incerta               |        -30 |
+| Crédito inicial sem reset  |        -20 |
+| Rate limit recente         |        -50 |
+| Erro de autenticação       |       -100 |
+| Billing required           |       -200 |
+| Sem saldo confirmado       |       -100 |
+
+---
+
+## 25. Fluxo completo de geração
+
+## 25.1 Antes da geração
+
+O app deve:
+
+1. Receber texto.
+2. Remover espaços desnecessários.
+3. Contar caracteres.
+4. Estimar tokens.
+5. Estimar duração.
+6. Detectar idioma, se necessário.
+7. Verificar modo escolhido.
+8. Verificar provedores habilitados.
+9. Remover provedores sem API key.
+10. Remover provedores sem suporte ao idioma.
+11. Consultar ou carregar cota.
+12. Estimar consumo em cada provedor.
+13. Aplicar reset policy.
+14. Aplicar regra de risco.
+15. Escolher provedor.
+16. Avisar se houver risco.
+
+---
+
+## 25.2 Durante a geração
+
+O app deve:
+
+1. Chamar provider adapter.
+2. Aplicar timeout.
+3. Aplicar retry controlado.
+4. Se erro recuperável, tentar fallback.
+5. Se erro de autenticação, bloquear provedor.
+6. Se erro de cobrança, bloquear provedor.
+7. Se erro de rate limit, marcar cooldown.
+8. Se erro de voz, tentar voz padrão.
+9. Se erro de idioma, tentar próximo provedor.
+
+---
+
+## 25.3 Depois da geração
+
+O app deve:
+
+1. Salvar áudio.
+2. Salvar metadados.
+3. Registrar uso no ledger.
+4. Atualizar cota.
+5. Registrar fallback se ocorreu.
+6. Atualizar histórico.
+7. Mostrar resultado.
+8. Permitir download.
+9. Permitir regenerar com outro provedor.
+
+---
+
+## 26. Text Chunker
+
+Textos longos devem ser divididos.
+
+## 26.1 Regras
+
+* Dividir por parágrafo.
+* Se o parágrafo for muito grande, dividir por frase.
+* Se a frase for muito grande, dividir por vírgulas.
+* Nunca quebrar palavra.
+* Evitar quebrar URLs.
+* Evitar quebrar números.
+* Manter pontuação.
+* Inserir pequena pausa entre chunks, se necessário.
+* Juntar áudios no final.
+
+## 26.2 Interface
+
+```python
+class TextChunker:
+    def split(self, text: str, max_chars: int) -> list[str]:
+        ...
+```
+
+## 26.3 Configuração
+
+```yaml
+chunk_limits:
+  elevenlabs: 4000
+  cartesia: 4000
+  smallest: 4000
+  gemini: 3000
+  inworld: 2000
+  async_voice: 4000
+```
+
+Esses valores devem ser editáveis.
+
+---
+
+## 27. Audio Storage
+
+Cada geração deve salvar:
+
+```text
+data/audio/
+  2026-06-27/
+    generation_id.mp3
+    generation_id.json
+```
+
+Metadados:
+
+```json
+{
+  "generation_id": "...",
+  "provider": "elevenlabs",
+  "model": "eleven_v3",
+  "voice_id": "...",
+  "language": "pt-BR",
+  "characters": 1234,
+  "usage_unit": "credits",
+  "usage_amount": 1234,
+  "quota_source": "official_api",
+  "reset_policy": "monthly_billing_cycle",
+  "fallback_chain": [],
+  "created_at": "..."
+}
+```
+
+---
+
+## 28. Tratamento de erros
+
+Criar erros padronizados:
+
+```python
+class QuotaExceededError(Exception): ...
+class RateLimitedError(Exception): ...
+class BillingRequiredError(Exception): ...
+class AuthError(Exception): ...
+class UnsupportedLanguageError(Exception): ...
+class UnsupportedVoiceError(Exception): ...
+class ProviderUnavailableError(Exception): ...
+class AudioGenerationError(Exception): ...
+class UnknownProviderError(Exception): ...
+```
+
+Cada adapter deve transformar erro externo em erro interno.
+
+Exemplos:
+
+| Erro externo     | Erro interno                          |
+| ---------------- | ------------------------------------- |
+| HTTP 401         | `AuthError`                           |
+| HTTP 403         | `AuthError` ou `BillingRequiredError` |
+| HTTP 429         | `RateLimitedError`                    |
+| Quota exceeded   | `QuotaExceededError`                  |
+| Billing required | `BillingRequiredError`                |
+| HTTP 500         | `ProviderUnavailableError`            |
+| Timeout          | `ProviderUnavailableError`            |
+| Voz inválida     | `UnsupportedVoiceError`               |
+| Idioma inválido  | `UnsupportedLanguageError`            |
+
+---
+
+## 29. Segurança
+
+## 29.1 API keys
+
+Regras obrigatórias:
+
+* API keys devem ficar no `.env` ou criptografadas no banco.
+* Nunca salvar chave pura no banco.
+* Nunca mostrar chave inteira na UI.
+* Nunca logar chave.
+* Nunca enviar chave para frontend externo.
+* Nunca versionar `.env`.
+* Usar `.env.example`.
+
+## 29.2 Modo público
+
+Se futuramente rodar em VPS:
+
+* Adicionar login.
+* Adicionar HTTPS.
+* Adicionar rate limit próprio.
+* Adicionar limite por usuário.
+* Adicionar auditoria.
+* Não deixar endpoint aberto.
+* Não permitir que visitantes usem suas cotas.
+
+---
+
+## 30. Logs
+
+Usar logs estruturados.
+
+Exemplo:
+
+```json
+{
+  "event": "tts_generation_started",
+  "provider": "cartesia",
+  "model": "sonic-3.5",
+  "characters": 523,
+  "language": "pt-BR"
+}
+```
+
+Eventos importantes:
+
+```text
+tts_generation_started
+tts_generation_success
+tts_generation_failed
+provider_skipped_no_key
+provider_skipped_quota
+provider_skipped_reset_uncertain
+provider_skipped_language
+provider_skipped_billing_risk
+fallback_triggered
+quota_refreshed
+quota_manual_updated
+api_key_invalid
+billing_required
+rate_limit_detected
+```
+
+---
+
+## 31. Testes
+
+## 31.1 Testes unitários
+
+Criar testes para:
+
+* `TextChunker`
+* `QuotaManager`
+* `ResetPolicyEngine`
+* `FallbackEngine`
+* `UsageEstimator`
+* `AudioStorage`
+* `ProviderRegistry`
+
+## 31.2 Testes de fallback
+
+Cenários:
+
+1. Primeiro provedor sem chave.
+2. Primeiro provedor sem cota.
+3. Primeiro provedor com rate limit.
+4. Primeiro provedor com billing required.
+5. Primeiro provedor com timeout.
+6. Primeiro provedor não suporta idioma.
+7. Todos os provedores falham.
+8. Fallback funciona e salva histórico.
+
+## 31.3 Testes de quota
+
+Cenários:
+
+1. Cota oficial abaixo de 80%.
+2. Cota oficial acima de 80%.
+3. Cota oficial acima de 90%.
+4. Cota oficial acima de 97%.
+5. Cota manual zerada.
+6. Cota desconhecida com texto curto.
+7. Cota desconhecida com texto longo.
+8. Crédito inicial não reseta automaticamente.
+9. Mensal reseta apenas quando data de ciclo chega.
+
+## 31.4 Testes reais manuais
+
+Criar comando:
+
+```bash
+python -m app.tools.test_provider --provider elevenlabs --text "Teste rápido."
+```
+
+E também:
+
+```bash
+python -m app.tools.refresh_quota --provider elevenlabs
+python -m app.tools.refresh_quota --provider cartesia
+python -m app.tools.test_fallback
+```
+
+---
+
+## 32. Fases de implementação
+
+## Fase 0 — Verificação manual dos provedores
+
+Objetivo: confirmar na prática quais provedores funcionam na conta do usuário.
+
+Tarefas:
+
+* Criar conta nos provedores.
+* Gerar API key.
+* Verificar se precisa cartão.
+* Verificar se a API aceita o plano grátis.
+* Testar um texto curto por API.
+* Conferir se existe endpoint de saldo.
+* Conferir se a cota é mensal, diária, inicial ou manual.
+* Criar documento `docs/provider-verification.md`.
+
+Entregável:
+
+```text
+docs/provider-verification.md
+```
+
+Com tabela:
+
+| Provedor | API funciona? | Precisa cartão? | Cota grátis? | Reset | Consulta saldo? | Observações |
+| -------- | ------------- | --------------- | ------------ | ----- | --------------- | ----------- |
+
+---
+
+## Fase 1 — Criar projeto base
+
+Tarefas:
+
+* Criar estrutura de pastas.
+* Configurar `pyproject.toml`.
+* Instalar dependências.
+* Criar `.env.example`.
+* Criar `config.example.yaml`.
+* Criar logger.
+* Criar sistema de config.
+* Criar banco SQLite.
+* Criar models iniciais.
+
+Entregável:
+
+App inicial rodando sem APIs reais.
+
+---
+
+## Fase 2 — Criar UI mockada
+
+Tarefas:
+
+* Criar tela de geração.
+* Criar tela de limites.
+* Criar tela de provedores.
+* Criar tela de histórico.
+* Criar tela de comparação.
+* Usar dados falsos.
+* Criar player com áudio exemplo.
+
+Entregável:
+
+Interface navegável.
+
+---
+
+## Fase 3 — Criar schemas e contratos
+
+Tarefas:
+
+* Criar `TTSRequest`.
+* Criar `TTSResult`.
+* Criar `QuotaSnapshot`.
+* Criar `UsageEstimate`.
+* Criar `ProviderError`.
+* Criar `TTSProvider`.
+* Criar `ProviderRegistry`.
+
+Entregável:
+
+Arquitetura pronta para adapters reais.
+
+---
+
+## Fase 4 — Criar Quota Manager
+
+Tarefas:
+
+* Implementar quota snapshot.
+* Implementar ledger local.
+* Implementar cota manual.
+* Implementar thresholds.
+* Implementar `free_only_mode`.
+* Implementar `allow_paid_overage`.
+* Implementar decisão de uso.
+* Implementar alerta visual.
+
+Entregável:
+
+App decide se um provedor pode ou não ser usado.
+
+---
+
+## Fase 5 — Criar Reset Policy Engine
+
+Tarefas:
+
+* Implementar `monthly_billing_cycle`.
+* Implementar `daily_rate_limit`.
+* Implementar `per_minute_rate_limit`.
+* Implementar `one_time_trial_credit`.
+* Implementar `manual_balance`.
+* Implementar `paid_topup`.
+* Implementar `pay_as_you_go`.
+* Criar testes.
+
+Entregável:
+
+App não confunde crédito mensal com crédito inicial.
+
+---
+
+## Fase 6 — Criar providers mockados
+
+Tarefas:
+
+* Criar `MockProviderSuccess`.
+* Criar `MockProviderQuotaExceeded`.
+* Criar `MockProviderRateLimited`.
+* Criar `MockProviderBillingRequired`.
+* Criar `MockProviderTimeout`.
+
+Entregável:
+
+Fallback testado sem gastar cota real.
+
+---
+
+## Fase 7 — Implementar ElevenLabs real
+
+Tarefas:
+
+* Autenticação.
+* Listar vozes.
+* Listar modelos.
+* Gerar áudio.
+* Consultar assinatura/cota.
+* Atualizar ledger.
+* Tratar erros.
+* Testar com texto curto.
+
+Entregável:
+
+Primeira API real funcionando.
+
+---
+
+## Fase 8 — Implementar Cartesia real
+
+Tarefas:
+
+* Autenticação.
+* Gerar áudio com Sonic.
+* Listar vozes.
+* Consultar uso se possível.
+* Usar chave admin quando necessária.
+* Tratar rate limit.
+* Registrar uso.
+
+Entregável:
+
+Cartesia funcionando com cota controlada.
+
+---
+
+## Fase 9 — Implementar Smallest.ai real
+
+Tarefas:
+
+* Autenticação.
+* Gerar áudio.
+* Configurar preço por caracteres.
+* Criar saldo manual.
+* Bloquear uso se saldo manual não existir.
+* Registrar estimativa.
+* Mostrar risco de reset incerto.
+
+Entregável:
+
+Smallest funcionando com controle seguro.
+
+---
+
+## Fase 10 — Implementar Gemini real
+
+Tarefas:
+
+* Autenticação.
+* Gerar fala.
+* Ler metadados de uso.
+* Tratar 429.
+* Criar aviso de limites no AI Studio.
+* Registrar rate limit local.
+* Não tratar como mensal.
+
+Entregável:
+
+Gemini funcionando como fallback controlado.
+
+---
+
+## Fase 11 — Implementar Inworld real
+
+Tarefas:
+
+* Autenticação.
+* Gerar áudio.
+* Configurar `voiceId`.
+* Configurar `modelId`.
+* Registrar minutos estimados.
+* Registrar caracteres.
+* Atualizar saldo manual/portal.
+* Mostrar período mensal UTC.
+
+Entregável:
+
+Inworld funcionando com medição híbrida.
+
+---
+
+## Fase 12 — Implementar Async Voice API
+
+Tarefas:
+
+* Autenticação.
+* Gerar áudio.
+* Suportar modelos Flash e Pro.
+* Configurar saldo manual.
+* Diferenciar assinatura mensal e top-up.
+* Tratar como fallback final.
+
+Entregável:
+
+Async funcionando como fallback.
+
+---
+
+## Fase 13 — Implementar fallback completo
+
+Tarefas:
+
+* Ranking automático.
+* Priorização por cota.
+* Priorização por risco.
+* Priorização por idioma.
+* Fallback em quota.
+* Fallback em rate limit.
+* Fallback em billing required.
+* Fallback em timeout.
+* Timeline de fallback na UI.
+* Histórico de fallback no banco.
+
+Entregável:
+
+Sistema multi-provider funcionando de verdade.
+
+---
+
+## Fase 14 — Polimento visual
+
+Tarefas:
+
+* Melhorar cards.
+* Criar badges.
+* Criar gráficos simples.
+* Criar alertas.
+* Criar filtros no histórico.
+* Criar exportação CSV.
+* Criar tela de ajuda.
+* Criar guia de configuração.
+
+Entregável:
+
+App bom e informativo para uso real.
+
+---
+
+## Fase 15 — Empacotamento
+
+Opções:
+
+### Rodar local
+
+```bash
+streamlit run app/ui/streamlit_app.py
+```
+
+### Rodar com Docker
+
+Criar:
+
+```text
+Dockerfile
+docker-compose.yml
+```
+
+### Rodar privado em VPS
+
+* Docker
+* Nginx ou Caddy
+* HTTPS
+* Login
+* Backup do SQLite
+* Pasta de áudio persistente
+
+---
+
+## 33. Documentos internos que o projeto deve ter
+
+Criar pasta `docs/`.
+
+## 33.1 `docs/provider-verification.md`
+
+Conteúdo:
+
+* Provedor.
+* API key criada.
+* API funcionando.
+* Modelo testado.
+* Idioma testado.
+* Cota grátis real.
+* Reset.
+* Fonte da cota.
+* Endpoint de uso.
+* Observações.
+
+## 33.2 `docs/quota-policies.md`
+
+Explicar:
+
+* Como o app decide se pode usar uma API.
+* Como funcionam os thresholds.
+* Como evitar gasto acidental.
+* Como configurar saldo manual.
+
+## 33.3 `docs/reset-policies.md`
+
+Explicar:
+
+* Mensal.
+* Diário.
+* Por minuto.
+* Crédito inicial.
+* Saldo manual.
+* Top-up.
+* Pay-as-you-go.
+
+## 33.4 `docs/api-notes.md`
+
+Para cada provedor:
+
+* Endpoint de TTS.
+* Endpoint de vozes.
+* Endpoint de uso.
+* Modelos disponíveis.
+* Idiomas disponíveis.
+* Limites.
+* Particularidades.
+
+---
+
+## 34. Prompt final para a IA implementar
+
+Use este prompt para uma IA de código:
+
+```markdown
+Você deve implementar um app Python chamado TTS Fallback App.
+
+Objetivo:
+Criar um app local em Python para gerar áudio TTS usando múltiplas APIs com cota grátis ou crédito inicial. O app deve permitir inserir texto, selecionar idioma, provedor, modelo e voz, gerar áudio, reproduzir/baixar o resultado, acompanhar limites grátis e fazer fallback automático para outro provedor quando a cota estiver perto de acabar ou quando ocorrer erro de quota, rate limit, timeout, billing required ou indisponibilidade.
+
+Stack:
+- Python 3.11+
+- Streamlit
+- SQLite
+- SQLModel ou SQLAlchemy
+- httpx
+- pydantic
+- python-dotenv
+- PyYAML
+- tenacity
+- loguru
+- pydub
+- ffmpeg
+
+Arquitetura obrigatória:
+- UI não pode chamar APIs diretamente.
+- Criar TTSService.
+- Criar TTSRouter.
+- Criar Provider Adapters.
+- Criar QuotaManager.
+- Criar ResetPolicyEngine.
+- Criar FallbackEngine.
+- Criar UsageLedger.
+- Criar AudioStorage.
+- Criar TextChunker.
+
+Provedores do MVP:
+1. ElevenLabs
+2. Cartesia
+3. Smallest.ai
+4. Gemini API
+5. Inworld
+6. Async Voice API
+
+Regra crítica:
+Nem toda cota grátis reseta mensalmente.
+O app deve diferenciar:
+- monthly_billing_cycle
+- daily_rate_limit
+- per_minute_rate_limit
+- one_time_trial_credit
+- manual_balance
+- paid_topup
+- pay_as_you_go
+- unknown
+
+Modo padrão:
+free_only_mode = true
+
+Nesse modo:
+- Nunca gastar dinheiro automaticamente.
+- Nunca usar pay-as-you-go sem confirmação.
+- Nunca usar top-up pago automaticamente.
+- Nunca assumir reset mensal sem confirmação.
+- Nunca gerar texto grande com cota incerta.
+- Bloquear provedor com billing_required.
+- Fazer fallback em quota_exceeded, rate_limited, timeout, server_error, unsupported_language, unsupported_voice e billing_required.
+
+Telas obrigatórias:
+1. Gerar áudio
+2. Limites e cotas
+3. Provedores
+4. Histórico
+5. Comparação de qualidade
+
+Banco:
+Criar tabelas:
+- providers
+- api_keys
+- quota_snapshots
+- manual_balances
+- usage_ledger
+- generations
+- fallback_events
+
+Critério de pronto:
+- Consigo digitar texto em português.
+- Consigo gerar áudio.
+- O app escolhe automaticamente um provedor seguro.
+- O app mostra se a cota é mensal, diária, manual, inicial ou incerta.
+- Se a cota está acabando, o app pula para outro provedor.
+- Se uma API retorna 429, quota exceeded ou billing required, o app faz fallback.
+- O áudio é salvo localmente.
+- O histórico mostra provedor, modelo, voz e consumo.
+- O painel de limites mostra usado, restante, reset e fonte da informação.
+- Nenhuma API key aparece em logs ou tela completa.
+```
+
+---
+
+## 35. Veredito técnico
+
+A melhor estrutura é:
+
+```text
+Streamlit UI
++ TTSService
++ TTSRouter
++ Provider Adapters
++ QuotaManager
++ ResetPolicyEngine
++ UsageLedger SQLite
++ FallbackEngine
++ AudioStorage
+```
+
+O ponto mais importante é o app ter uma visão clara de:
+
+```text
+Cota disponível
++ tipo de reset
++ fonte da informação
++ confiança da informação
++ risco de cobrança
+```
+
+Sem isso, o app pode gerar áudio, mas não será seguro.
+
+Com isso, o app vira um gerenciador inteligente de APIs TTS grátis, capaz de usar cada provedor da forma correta, sem confundir crédito mensal com crédito inicial e sem gastar dinheiro sem perceber.
