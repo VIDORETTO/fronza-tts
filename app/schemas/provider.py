@@ -28,3 +28,5 @@ class VoiceInfo(BaseModel):
     name: str | None = None
     language: str | None = None
     is_default: bool = False
+    preview_url: str | None = None
+    labels: dict[str, str] = {}

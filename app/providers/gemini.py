@@ -3,7 +3,6 @@ from datetime import datetime
 
 import httpx
 
-from app.core.audio_storage import AudioStorage
 from app.db.repositories import api_key_repo
 from app.providers.adapter_base import ProviderAdapter
 from app.providers.registry import registry
@@ -14,6 +13,14 @@ from app.utils.logging import logger
 
 BASE_URL = "https://generativelanguage.googleapis.com"
 
+GEMINI_VOICES = [
+    VoiceInfo(provider_id="gemini", voice_id="Kore", name="Kore"),
+    VoiceInfo(provider_id="gemini", voice_id="Puck", name="Puck"),
+    VoiceInfo(provider_id="gemini", voice_id="Charon", name="Charon"),
+    VoiceInfo(provider_id="gemini", voice_id="Aoede", name="Aoede"),
+    VoiceInfo(provider_id="gemini", voice_id="Fenrir", name="Fenrir"),
+]
+
 
 class GeminiProvider(ProviderAdapter):
     provider_id = "gemini"
@@ -22,56 +29,19 @@ class GeminiProvider(ProviderAdapter):
         return api_key_repo.get_decrypted("gemini") or ""
 
     def list_models(self) -> list[ModelInfo]:
-        api_key = self._get_api_key()
-        if not api_key:
-            return [
-                ModelInfo(provider_id=self.provider_id, model_id="gemini-3.1-flash-tts-preview", name="Gemini 3.1 Flash TTS Preview"),
-            ]
-        try:
-            with httpx.Client(timeout=15) as client:
-                resp = client.get(
-                    f"{BASE_URL}/v1beta/models",
-                    params={"key": api_key},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                models = []
-                for m in data.get("models", []):
-                    name = m.get("name", "")
-                    if "tts" in name.lower():
-                        model_id = name.split("/")[-1]
-                        models.append(
-                            ModelInfo(
-                                provider_id=self.provider_id,
-                                model_id=model_id,
-                                name=m.get("displayName", model_id),
-                            )
-                        )
-                return models or [
-                    ModelInfo(provider_id=self.provider_id, model_id="gemini-3.1-flash-tts-preview", name="Gemini 3.1 Flash TTS Preview"),
-                ]
-        except Exception as e:
-            logger.warning(f"Gemini list_models failed: {e}")
-            return [
-                ModelInfo(provider_id=self.provider_id, model_id="gemini-3.1-flash-tts-preview", name="Gemini 3.1 Flash TTS Preview"),
-            ]
+        return [
+            ModelInfo(provider_id=self.provider_id, model_id="gemini-3.1-flash-tts-preview", name="Gemini 3.1 Flash TTS Preview", languages=["en", "pt-BR", "es", "fr", "de", "it", "ja", "ko", "zh"], is_default=True),
+            ModelInfo(provider_id=self.provider_id, model_id="gemini-3.5-flash-tts-preview", name="Gemini 3.5 Flash TTS Preview", languages=["en", "pt-BR", "es", "fr", "de", "it", "ja", "ko", "zh"]),
+        ]
 
     def list_voices(self, language: str | None = None) -> list[VoiceInfo]:
-        return [
-            VoiceInfo(provider_id=self.provider_id, voice_id="Kore", name="Kore"),
-            VoiceInfo(provider_id=self.provider_id, voice_id="Puck", name="Puck"),
-            VoiceInfo(provider_id=self.provider_id, voice_id="Charon", name="Charon"),
-            VoiceInfo(provider_id=self.provider_id, voice_id="Aoede", name="Aoede"),
-            VoiceInfo(provider_id=self.provider_id, voice_id="Fenrir", name="Fenrir"),
-        ]
+        return [v.model_copy(update={"language": language}) for v in GEMINI_VOICES]
 
     def get_quota(self) -> QuotaSnapshot:
         return QuotaSnapshot(
             provider_id=self.provider_id,
             unit="requests",
-            used=0,
-            limit=1500,
-            remaining=1500,
+            used=0, limit=1500, remaining=1500,
             reset_policy="daily_rate_limit",
             source="response_metadata",
             confidence="medium",
@@ -102,19 +72,26 @@ class GeminiProvider(ProviderAdapter):
                 params={"key": api_key},
                 json=payload,
             )
-            if resp.status_code == 401 or resp.status_code == 403:
+            if resp.status_code in (401, 403):
                 raise self._auth_error(f"Gemini auth error: {resp.text}")
             if resp.status_code == 429:
                 raise self._rate_limit_error("Gemini rate limited")
             resp.raise_for_status()
             data = resp.json()
 
-            audio_b64 = data.get("output_audio", {}).get("data")
+            audio_b64 = None
+            if "output_audio" in data and "data" in data["output_audio"]:
+                audio_b64 = data["output_audio"]["data"]
+            elif "candidates" in data:
+                for c in data["candidates"]:
+                    if "audio" in c:
+                        audio_b64 = c["audio"].get("data")
+                        break
             if not audio_b64:
                 raise self._generation_error("No audio data in Gemini response")
-
             audio_data = base64.b64decode(audio_b64)
 
+        from app.core.audio_storage import AudioStorage
         storage = AudioStorage()
         file_path = storage.save_audio(audio_data, format="wav", metadata={
             "provider": self.provider_id,
@@ -133,6 +110,9 @@ class GeminiProvider(ProviderAdapter):
             output_format="wav",
         )
 
+    def supports_language(self, language: str | None) -> bool:
+        return True
+
     def _auth_error(self, msg):
         from app.core.errors import AuthError
         return AuthError(msg)
@@ -144,9 +124,6 @@ class GeminiProvider(ProviderAdapter):
     def _generation_error(self, msg):
         from app.core.errors import AudioGenerationError
         return AudioGenerationError(msg)
-
-    def supports_language(self, language: str | None) -> bool:
-        return True
 
 
 registry.register(GeminiProvider())

@@ -9,13 +9,10 @@ st.set_page_config(
 
 from app.core.config import config
 from app.db.init_db import init_database
-from app.db.repositories import api_key_repo, provider_repo
-from app.utils.logging import logger
-from app.utils.security import mask_api_key
+from app.db.repositories import api_key_repo
 
 init_database()
 
-# Import all providers to register them
 import app.providers.elevenlabs  # noqa: F401
 import app.providers.cartesia  # noqa: F401
 import app.providers.smallest  # noqa: F401
@@ -24,6 +21,19 @@ import app.providers.inworld  # noqa: F401
 import app.providers.async_voice  # noqa: F401
 
 from app.providers.registry import registry
+from app.ui.pages._1_generate import show as gen
+from app.ui.pages._2_limits import show as limits
+from app.ui.pages._3_providers import show as providers
+from app.ui.pages._4_history import show as history
+from app.ui.pages._5_compare import show as compare
+
+gen_page = st.Page(gen, title="Gerar Áudio", icon="🎙️", url_path="generate", default=True)
+limits_page = st.Page(limits, title="Limites e Cotas", icon="📊", url_path="limits")
+providers_page = st.Page(providers, title="Provedores", icon="🔌", url_path="providers")
+history_page = st.Page(history, title="Histórico", icon="📜", url_path="history")
+compare_page = st.Page(compare, title="Comparar", icon="⚖️", url_path="compare")
+
+pg = st.navigation([gen_page, limits_page, providers_page, history_page, compare_page])
 
 st.sidebar.title("🎤 TTS Fallback App")
 st.sidebar.caption("Gerenciador inteligente de TTS multi-API")
@@ -31,33 +41,14 @@ st.sidebar.caption("Gerenciador inteligente de TTS multi-API")
 mode = "🛡️ Gratuito" if config.app.free_only_mode else "⚠️ Permitir pagos"
 st.sidebar.info(f"Modo: **{mode}**")
 
-page = st.sidebar.radio(
-    "Navegação",
-    ["Gerar Áudio", "Limites e Cotas", "Provedores", "Histórico", "Comparar"],
-)
-
 st.sidebar.divider()
 st.sidebar.markdown("### API Keys")
 
 for pid in registry.list_ids():
     keys = api_key_repo.get_by_provider(pid)
     if keys:
-        st.sidebar.success(f"✅ {pid}: configurada")
+        st.sidebar.success(f"✅ {pid}")
     else:
-        st.sidebar.warning(f"❌ {pid}: não configurada")
+        st.sidebar.warning(f"❌ {pid}")
 
-if page == "Gerar Áudio":
-    from app.ui.pages._1_generate import show as g
-    g()
-elif page == "Limites e Cotas":
-    from app.ui.pages._2_limits import show as l
-    l()
-elif page == "Provedores":
-    from app.ui.pages._3_providers import show as p
-    p()
-elif page == "Histórico":
-    from app.ui.pages._4_history import show as h
-    h()
-elif page == "Comparar":
-    from app.ui.pages._5_compare import show as c
-    c()
+pg.run()
