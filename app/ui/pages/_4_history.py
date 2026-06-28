@@ -10,6 +10,9 @@ def show():
 
     tab_all, tab_favorites = st.tabs(["Todas", "Favoritas"])
 
+    with tab_favorites:
+        st.info("⭐ Marque gerações como favoritas para vê-las aqui. (Funcionalidade em breve)")
+
     with tab_all:
         generations = generation_repo.list_all(limit=50)
 
