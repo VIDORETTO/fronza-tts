@@ -40,7 +40,7 @@ class ProviderConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    name: str = "TTS Fallback App"
+    name: str = "Fronza TTS"
     free_only_mode: bool = True
     default_language: str = "pt-BR"
     default_output_format: str = "mp3"

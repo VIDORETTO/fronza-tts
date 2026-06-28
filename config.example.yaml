@@ -1,5 +1,5 @@
 app:
-  name: "TTS Fallback App"
+  name: "Fronza TTS"
   free_only_mode: true
   default_language: "pt-BR"
   default_output_format: "mp3"

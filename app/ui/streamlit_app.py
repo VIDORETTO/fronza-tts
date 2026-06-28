@@ -1,7 +1,7 @@
 import streamlit as st
 
 st.set_page_config(
-    page_title="TTS Fallback App",
+    page_title="Fronza TTS",
     page_icon="🎤",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -35,7 +35,7 @@ compare_page = st.Page(compare, title="Comparar", icon="⚖️", url_path="compa
 
 pg = st.navigation([gen_page, limits_page, providers_page, history_page, compare_page])
 
-st.sidebar.title("🎤 TTS Fallback App")
+st.sidebar.title("🎤 Fronza TTS")
 st.sidebar.caption("Gerenciador inteligente de TTS multi-API")
 
 mode = "🛡️ Gratuito" if config.app.free_only_mode else "⚠️ Permitir pagos"

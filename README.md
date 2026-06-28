@@ -1,5 +1,5 @@
 
-![TTS Fallback App](https://img.shields.io/badge/TTS-Fallback%20App-8B5CF6?style=for-the-badge&logo=python&logoColor=white)
+![Fronza TTS](https://img.shields.io/badge/Fronza-TTS-8B5CF6?style=for-the-badge&logo=python&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
@@ -7,7 +7,7 @@
 
 ---
 
-<h1 align="center">🎤 TTS Fallback App</h1>
+<h1 align="center">🎤 Fronza TTS</h1>
 
 <p align="center">
   <em>Gerencie múltiplas APIs de Text-to-Speech com fallback automático,<br>
@@ -27,7 +27,7 @@
 
 ## 🌟 Sobre o Projeto
 
-**TTS Fallback App** é uma aplicação desktop/web em Python que funciona como uma **camada inteligente** entre você e várias APIs de Text-to-Speech (TTS).
+**Fronza TTS** é uma aplicação desktop/web em Python que funciona como uma **camada inteligente** entre você e várias APIs de Text-to-Speech (TTS).
 
 Em vez de você lidar com cada provedor individualmente, o app:
 
@@ -81,7 +81,7 @@ Em vez de você lidar com cada provedor individualmente, o app:
 ### ⚙️ Arquitetura
 
 ```
-TTS Fallback App
+Fronza TTS
 │
 ├── 🖥️ UI (Streamlit)
 │   ├── Gerar Áudio
