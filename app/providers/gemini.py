@@ -66,29 +66,35 @@ class GeminiProvider(ProviderAdapter):
             "stream": False,
         }
 
+        headers = {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+            "Api-Revision": "2026-05-20",
+        }
+
         with httpx.Client(timeout=60) as client:
             resp = client.post(
                 f"{BASE_URL}/v1beta/interactions",
-                params={"key": api_key},
+                headers=headers,
                 json=payload,
             )
             if resp.status_code in (401, 403):
-                raise self._auth_error(f"Gemini auth error: {resp.text}")
+                raise self._auth_error(f"Gemini auth error: {resp.status_code} - {resp.text[:200]}")
             if resp.status_code == 429:
                 raise self._rate_limit_error("Gemini rate limited")
+            if resp.status_code == 400:
+                error_detail = resp.text[:300]
+                logger.error(f"Gemini 400 error: {error_detail}")
+                raise self._generation_error(f"Gemini bad request: {error_detail}")
             resp.raise_for_status()
             data = resp.json()
 
-            audio_b64 = None
-            if "output_audio" in data and "data" in data["output_audio"]:
-                audio_b64 = data["output_audio"]["data"]
-            elif "candidates" in data:
-                for c in data["candidates"]:
-                    if "audio" in c:
-                        audio_b64 = c["audio"].get("data")
-                        break
+            audio_b64 = self._extract_audio(data)
             if not audio_b64:
+                logger.error(f"Gemini response no audio data. Keys: {list(data.keys())}")
+                logger.debug(f"Response preview: {str(data)[:500]}")
                 raise self._generation_error("No audio data in Gemini response")
+
             audio_data = base64.b64decode(audio_b64)
 
         from app.core.audio_storage import AudioStorage
@@ -109,6 +115,29 @@ class GeminiProvider(ProviderAdapter):
             audio_file_path=file_path,
             output_format="wav",
         )
+
+    def _extract_audio(self, data: dict) -> str | None:
+        if "output_audio" in data and isinstance(data["output_audio"], dict):
+            audio = data["output_audio"]
+            if "data" in audio and audio["data"]:
+                return audio["data"]
+
+        if "steps" in data and isinstance(data["steps"], list):
+            for step in data["steps"]:
+                if step.get("type") == "model_output":
+                    content = step.get("content", [])
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "audio":
+                            if "data" in item and item["data"]:
+                                return item["data"]
+
+        if "candidates" in data and isinstance(data["candidates"], list):
+            for c in data["candidates"]:
+                if "audio" in c and isinstance(c["audio"], dict):
+                    if "data" in c["audio"] and c["audio"]["data"]:
+                        return c["audio"]["data"]
+
+        return None
 
     def supports_language(self, language: str | None) -> bool:
         return True
